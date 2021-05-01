@@ -32,6 +32,7 @@ from tensorflow.python.data.ops import iterator_ops
 from tensorflow.python.data.ops import multi_device_iterator_ops
 from tensorflow.python.data.ops import optional_ops
 from tensorflow.python.distribute import device_util
+from tensorflow.python.distribute import distribute_lib
 from tensorflow.python.distribute import distribute_utils
 from tensorflow.python.distribute import distribution_strategy_context
 from tensorflow.python.distribute import input_ops
@@ -1229,7 +1230,6 @@ class DistributedDataset(_IterableInput, composite_tensor.CompositeTensor):
       for i, worker in enumerate(input_workers.worker_devices):
         with ops.device(worker):
           cloned_dataset = replicated_ds[worker]
-          cloned_dataset = cloned_dataset.with_options(dataset.options())
           if rebatch_fn is not None:
             cloned_dataset = rebatch_fn(cloned_dataset, i)
           cloned_dataset = input_ops.auto_shard_dataset(
@@ -1788,6 +1788,17 @@ def _dummy_tensor_fn(value_structure):
 
   def create_dummy_tensor(spec):
     """Create a dummy tensor with possible batch dimensions set to 0."""
+    if hasattr(spec, "_create_empty_value"):
+      # Type spec may overwrite default dummy values behavior by declaring the
+      # `_create_empty_value(self)` method. This method must return a value
+      # compatible with the type spec with batch dimensions set to 0 or fail if
+      # such a value does not exist. This allows a composite tensor to customize
+      # dummy values creation as, in general, its dummy value is not composed
+      # from dummy components (e.g. `row_splits` tensor of a RaggedTensor is
+      # never allowed to be empty). See b/183969859 for more discussions.
+      # TODO(b/186079336): reconsider CompositeTensor support.
+      return spec._create_empty_value()  # pylint: disable=protected-access
+
     if isinstance(spec, ragged_tensor.RaggedTensorSpec):
       # Splice out the ragged dimensions.
       # pylint: disable=protected-access
@@ -1996,7 +2007,9 @@ class _SingleWorkerDatasetIteratorSpec(type_spec.TypeSpec):
       self._devices = tuple(
           device_util.canonicalize_without_job_and_task(d) for d in devices)
     self._element_spec = element_spec
-    self._options = options
+    # `self._options` intentionally made not `None` for proper serialization.
+    self._options = (options if options is not None else
+                     distribute_lib.InputOptions())
     self._canonicalize_devices = canonicalize_devices
 
   @property
